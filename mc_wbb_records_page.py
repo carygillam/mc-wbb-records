@@ -758,41 +758,88 @@ def top_rows_for_category(df: pd.DataFrame, category: str, top_n: int) -> pd.Dat
 
 
 def category_display_order(category: Any) -> tuple[int, int, str]:
-    """Return a stable, human-friendly sort key for record categories."""
-    name = normalize_category(category)
-    if name in CATEGORY_ORDER_INDEX:
-        return (CATEGORY_ORDER_INDEX[name], 0, name)
+    """Return a stable, human-friendly sort key for record categories.
 
+    This is intentionally phrase-based instead of alphabetic so career rows read
+    like a basketball record book:
+
+    - Field goals made: career, 2 years, 3 years, 4 years
+    - Field goals attempted: career, 2 years, 3 years, 4 years
+    - 3PT made before 3PT attempted
+    - FT made before FT attempted
+
+    Important: 3-point labels contain the words "field goals", so 3PT checks
+    must happen before general field-goal checks.
+    """
+    name = normalize_category(category)
     lowered = name.lower()
-    phrase_order = (
-        ("points", 0),
+
+    years_match = re.search(r"(\d+)\s*years?", lowered)
+    # Base/career category first, then 2-year, 3-year, 4-year variants.
+    years_order = int(years_match.group(1)) if years_match else 0
+
+    ordered_phrases: tuple[tuple[str, int], ...] = (
+        ("points scored", 0),
         ("scoring average", 1),
+        ("points per game", 1),
         ("field goals made", 2),
         ("field goals attempted", 3),
         ("field goal percentage", 4),
         ("3-pt field goals made", 5),
         ("3-pt field goals attempted", 6),
         ("3-pt fg percentage", 7),
+        ("3-pt field goal percentage", 7),
         ("free throws made", 8),
         ("free throws attempted", 9),
         ("free throw percentage", 10),
         ("rebounds", 11),
+        ("rebound average", 12),
         ("rebounding average", 12),
         ("assists", 13),
         ("steals", 14),
         ("blocked shots", 15),
+        ("blocks", 15),
         ("fouls", 16),
         ("games played", 17),
+        ("pgames played", 17),
     )
-    for phrase, order in phrase_order:
+
+    # 3PT must be checked before general FG because it contains "field goals".
+    priority_phrases: tuple[tuple[str, int], ...] = (
+        ("3-pt field goals made", 5),
+        ("3-pt field goals attempted", 6),
+        ("3-pt fg percentage", 7),
+        ("3-pt field goal percentage", 7),
+        *ordered_phrases,
+    )
+
+    for phrase, order in priority_phrases:
         if phrase in lowered:
-            # Keep variants such as 2-year, 3-year, and career records together.
-            years_match = re.search(r"(\d+) years?", lowered)
-            years_order = int(years_match.group(1)) if years_match else 99
-            return (100 + order, years_order, name)
+            return (order, years_order, name)
 
-    return (999, 99, name)
+    return (999, years_order, name)
 
+
+def category_group_label(category: Any) -> str:
+    """Group categories into visual sections for an easier-to-scan records page.
+
+    3-point records are checked before Field Goals because their labels include
+    "field goals" and would otherwise appear in the wrong section.
+    """
+    lowered = normalize_category(category).lower()
+    if any(phrase in lowered for phrase in ("3-pt field goals made", "3-pt field goals attempted", "3-pt fg percentage")):
+        return "3-Point Shooting"
+    if any(phrase in lowered for phrase in ("field goals made", "field goals attempted", "field goal percentage")):
+        return "Field Goals"
+    if any(phrase in lowered for phrase in ("points", "scoring average")):
+        return "Scoring"
+    if any(phrase in lowered for phrase in ("free throws made", "free throws attempted", "free throw percentage")):
+        return "Free Throws"
+    if any(phrase in lowered for phrase in ("rebounds", "rebound average", "rebounding average")):
+        return "Rebounding"
+    if any(phrase in lowered for phrase in ("assists", "steals", "blocked shots", "blocks", "fouls", "games played")):
+        return "Playmaking & Defense"
+    return "Other Records"
 
 def sort_by_category_display_order(df: pd.DataFrame) -> pd.DataFrame:
     """Sort records by the custom stat order while preserving normal tie-breakers."""
@@ -931,15 +978,6 @@ def format_value(value: Any) -> str:
     if pd.isna(numeric_value):
         return str(value)
     return f"{numeric_value:g}"
-
-
-def category_group_label(category: Any) -> str:
-    """Group categories into visual sections for an easier-to-scan records page."""
-    lowered = normalize_category(category).lower()
-    for group_name, phrases in CATEGORY_GROUPS:
-        if any(phrase in lowered for phrase in phrases):
-            return group_name
-    return "Other Records"
 
 
 def inject_table_styles() -> None:
