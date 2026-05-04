@@ -812,13 +812,129 @@ def inject_table_styles() -> None:
             overflow: hidden;
             background: var(--mc-card);
         }
+
+
+        .mobile-label {
+            display: none;
+        }
+        .desktop-only {
+            display: block;
+        }
+        .mobile-help {
+            display: none;
+        }
+        .rank-row {
+            border: 1px solid var(--mc-border);
+            border-radius: 15px;
+            padding: 0.18rem 0.25rem;
+            margin-bottom: 0.45rem;
+            background: var(--mc-card-soft);
+            box-shadow: var(--mc-row-shadow);
+        }
+        .rank-header {
+            color: var(--mc-muted);
+            font-size: 0.72rem;
+            font-weight: 900;
+            letter-spacing: 0.055em;
+            text-transform: uppercase;
+            padding: 0.55rem 0.7rem 0.45rem;
+        }
+
+        @media (max-width: 768px) {
+            .block-container {
+                padding-left: 0.75rem;
+                padding-right: 0.75rem;
+                padding-top: 0.75rem;
+            }
+            .mc-hero {
+                border-radius: 18px;
+                padding: 1rem 1rem;
+                margin-bottom: 0.85rem;
+            }
+            .mc-title {
+                font-size: 1.55rem;
+                line-height: 1.15;
+            }
+            .mc-subtitle {
+                font-size: 0.92rem;
+                line-height: 1.45;
+            }
+            .records-panel {
+                border-radius: 17px;
+                padding: 0.9rem;
+            }
+            .desktop-only,
+            .record-header,
+            .rank-header {
+                display: none !important;
+            }
+            .mobile-help {
+                display: block;
+                color: var(--mc-muted);
+                font-size: 0.88rem;
+                margin: 0.35rem 0 0.75rem;
+            }
+            div[data-testid="column"] {
+                width: 100% !important;
+                flex: 1 1 100% !important;
+                min-width: 100% !important;
+            }
+            .record-row,
+            .rank-row {
+                border-radius: 18px;
+                padding: 0.55rem 0.65rem;
+                margin-bottom: 0.85rem;
+                background: var(--mc-card);
+            }
+            .record-cell {
+                min-height: auto;
+                padding: 0.34rem 0.1rem;
+                display: block;
+            }
+            .mobile-label {
+                display: block;
+                color: var(--mc-muted);
+                font-size: 0.7rem;
+                font-weight: 900;
+                letter-spacing: 0.06em;
+                text-transform: uppercase;
+                margin-bottom: 0.08rem;
+            }
+            .record-category {
+                font-size: 1.03rem;
+                line-height: 1.25;
+            }
+            .record-player {
+                font-size: 1rem;
+            }
+            .record-value-pill {
+                min-width: auto;
+                padding: 0.22rem 0.7rem;
+            }
+            div.stButton > button {
+                min-height: 2.75rem;
+                margin-top: 0.35rem;
+                font-size: 0.95rem;
+            }
+            div[data-testid="stMetric"] {
+                padding: 0.75rem 0.85rem;
+                border-radius: 15px;
+            }
+            div[data-testid="stDataFrame"] {
+                font-size: 0.84rem;
+            }
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-def render_table_cell(column: Any, value: Any, css_class: str = "") -> None:
-    column.markdown(f'<div class="record-cell {css_class}">{value}</div>', unsafe_allow_html=True)
+def render_table_cell(column: Any, value: Any, css_class: str = "", label: str = "") -> None:
+    label_html = f'<span class="mobile-label">{label}</span>' if label else ""
+    column.markdown(
+        f'<div class="record-cell {css_class}">{label_html}<span>{value}</span></div>',
+        unsafe_allow_html=True,
+    )
 
 
 def render_holder_table_header() -> None:
@@ -836,11 +952,11 @@ def render_holder_table_row(row: pd.Series, top_n: int, index: int) -> None:
 
     st.markdown('<div class="record-row">', unsafe_allow_html=True)
     category_col, player_col, value_col, season_col, source_col, action_col = st.columns(HOLDER_TABLE_COLUMN_WEIGHTS)
-    render_table_cell(category_col, category, "record-category")
-    render_table_cell(player_col, player, "record-player")
-    render_table_cell(value_col, f'<span class="record-value-pill">{value}</span>')
-    render_table_cell(season_col, season, "record-muted")
-    render_table_cell(source_col, source, "record-muted")
+    render_table_cell(category_col, category, "record-category", "Category")
+    render_table_cell(player_col, player, "record-player", "Record holder")
+    render_table_cell(value_col, f'<span class="record-value-pill">{value}</span>', label="Value")
+    render_table_cell(season_col, season, "record-muted", "Season")
+    render_table_cell(source_col, source, "record-muted", "Source")
     action_col.button(
         "View top",
         key=f"open_holder_{index}_{category}_{player}_{season}",
@@ -868,6 +984,8 @@ def render_current_holders_screen(filtered_df: pd.DataFrame, top_n: int) -> None
         unsafe_allow_html=True,
     )
 
+    st.markdown('<div class="mobile-help">Each card shows the current holder. Tap <b>View top</b> to open that category ranking.</div>', unsafe_allow_html=True)
+
     holders = sort_by_category_display_order(holders)
     render_holder_table_header()
 
@@ -879,6 +997,29 @@ def render_current_holders_screen(filtered_df: pd.DataFrame, top_n: int) -> None
             st.markdown(f'<div class="section-title">{group_name}</div>', unsafe_allow_html=True)
         render_holder_table_row(row, top_n, index)
 
+
+
+def render_ranked_table_header() -> None:
+    headers = ["Rank", "Value", "Player", "Season", "Source"]
+    for col, label in zip(st.columns([0.65, 0.9, 2.35, 1.25, 1.35]), headers):
+        col.markdown(f'<div class="rank-header">{label}</div>', unsafe_allow_html=True)
+
+
+def render_ranked_table_row(row: pd.Series) -> None:
+    st.markdown('<div class="rank-row">', unsafe_allow_html=True)
+    rank_col, value_col, player_col, season_col, source_col = st.columns([0.65, 0.9, 2.35, 1.25, 1.35])
+    render_table_cell(rank_col, str(row["Rank"]), "record-player", "Rank")
+    render_table_cell(value_col, f'<span class="record-value-pill">{format_value(row["Value"])}</span>', label="Value")
+    render_table_cell(player_col, str(row["Player"]), "record-player", "Player")
+    render_table_cell(season_col, str(row["Season"]), "record-muted", "Season")
+    render_table_cell(source_col, str(row["Source"]), "record-muted", "Source")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+def render_ranked_rows(top_rows: pd.DataFrame) -> None:
+    render_ranked_table_header()
+    for _, row in top_rows.iterrows():
+        render_ranked_table_row(row)
 
 def render_category_detail_screen(filtered_df: pd.DataFrame, category: str, top_n: int) -> None:
     top_rows = top_rows_for_category(filtered_df, category, top_n)
@@ -894,7 +1035,10 @@ def render_category_detail_screen(filtered_df: pd.DataFrame, category: str, top_
         st.info("No rows match this category with the current filters.")
         return
 
-    st.dataframe(top_rows, height=520, use_container_width=True, hide_index=True)
+    render_ranked_rows(top_rows)
+
+    with st.expander("Show this top list as a table", expanded=False):
+        st.dataframe(top_rows, height=420, use_container_width=True, hide_index=True)
 
     with st.expander("Show all candidate rows for this category", expanded=False):
         category_rows = filtered_df[filtered_df["Category"] == category]
