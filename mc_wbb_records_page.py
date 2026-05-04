@@ -187,6 +187,64 @@ def normalize_player_key(value: Any) -> str:
     return text
 
 
+
+
+AGGREGATE_PLAYER_NAMES = {
+    "team",
+    "teams",
+    "total",
+    "totals",
+    "team totals",
+    "totals team",
+    "opponent",
+    "opponents",
+    "opponent totals",
+    "opponents totals",
+    "mcpherson",
+    "mcpherson college",
+    "mcpherson bulldogs",
+}
+
+
+def is_aggregate_player_name(value: Any) -> bool:
+    """Return True for team/opponent/total rows that should not count as player records."""
+    name = normalize_text_key(value)
+    compact_name = re.sub(r"[^a-z0-9]+", " ", name).strip()
+
+    if compact_name in AGGREGATE_PLAYER_NAMES:
+        return True
+
+    # Catch common variants from scraped stats tables such as
+    # "McPherson Team", "Team Total", "Opponent Totals", etc.
+    aggregate_phrases = (
+        "team total",
+        "team totals",
+        "total team",
+        "totals team",
+        "opponent total",
+        "opponent totals",
+        "opponents total",
+        "opponents totals",
+    )
+    return any(phrase in compact_name for phrase in aggregate_phrases)
+
+
+def remove_aggregate_player_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop non-player aggregate rows before building record candidates.
+
+    Some scraped stat tables include team totals or opponent totals beside real
+    player rows. Those totals can create impossible records, such as 447 field
+    goals made for one season. Filtering here keeps the record dashboard limited
+    to individual player records.
+    """
+    if df.empty or "Player" not in df.columns:
+        return df
+
+    cleaned = df.copy()
+    player_names = cleaned["Player"].fillna("")
+    return cleaned[~player_names.map(is_aggregate_player_name)].copy()
+
+
 def normalize_value_key(value: Any) -> float | None:
     """Normalize numeric record values for duplicate checks."""
     numeric_value = pd.to_numeric(value, errors="coerce")
@@ -196,16 +254,17 @@ def normalize_value_key(value: Any) -> float | None:
 
 
 def prefer_current_stats_duplicates(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove extracted rows when the same player/category/value exists in current stats.
+    """Clean duplicates while protecting the PDF record category.
 
-    The extracted PDFs and the current stats files can contain the same record row.
-    When that happens, keep the Current stats row because it is generated from the
-    cleaned stat dataset and prevents duplicate players in the top lists.
-
-    Duplicate identity intentionally uses RecordType + Category + normalized Player + Value.
-    Season is not included because career rows can describe the same span slightly
-    differently between extracted and current files. Player names are normalized so
-    formats like "Brown, Bailey" and "Bailey Brown" are treated as the same player.
+    Rules:
+    1. If the same record appears in both Current stats and Extracted record with
+       the same category, keep Current stats.
+    2. If Current stats has the same player/season/value as an Extracted record
+       but under a different category, drop the Current stats row. In that case,
+       the PDF/extracted category is treated as the source of truth for the
+       category label. This prevents mistakes like 447 field-goal attempts being
+       displayed as field goals made.
+    3. Normalize player names so "Bailey Brown" and "Brown, Bailey" match.
     """
     if df.empty:
         return empty_candidates()
@@ -214,19 +273,104 @@ def prefer_current_stats_duplicates(df: pd.DataFrame) -> pd.DataFrame:
     deduped["_record_type_key"] = deduped["RecordType"].map(normalize_text_key)
     deduped["_category_key"] = deduped["Category"].map(normalize_text_key)
     deduped["_player_key"] = deduped["Player"].map(normalize_player_key)
+    deduped["_season_key"] = deduped["Season"].map(normalize_text_key)
     deduped["_value_key"] = deduped["Value"].map(normalize_value_key)
-    deduped["_source_priority"] = deduped["Source"].map({"Current stats": 0, "Extracted record": 1}).fillna(2)
 
+    # If a current-stat row has the same player/season/value as an extracted PDF
+    # row but the category is different, keep the extracted row and remove the
+    # current row. The extracted record file is the authority for category labels.
+    extracted_exact_player_keys = set(
+        deduped.loc[
+            deduped["Source"] == "Extracted record",
+            ["_record_type_key", "_player_key", "_season_key", "_value_key"],
+        ].itertuples(index=False, name=None)
+    )
+    extracted_exact_category_keys = set(
+        deduped.loc[
+            deduped["Source"] == "Extracted record",
+            ["_record_type_key", "_category_key", "_player_key", "_season_key", "_value_key"],
+        ].itertuples(index=False, name=None)
+    )
+
+    # Extra guard for old season rows: if a PDF/extracted record has the same
+    # season and value but a different category, the current stats row is likely
+    # coming from a shifted/imported historical row. Example: Susan Sundahl's
+    # 447 is field-goal attempts, not field goals made. This broader key catches
+    # those cases even if the player name format/spelling differs slightly.
+    extracted_season_value_keys = set(
+        deduped.loc[
+            deduped["Source"] == "Extracted record",
+            ["_record_type_key", "_season_key", "_value_key"],
+        ].itertuples(index=False, name=None)
+    )
+    extracted_season_value_category_keys = set(
+        deduped.loc[
+            deduped["Source"] == "Extracted record",
+            ["_record_type_key", "_category_key", "_season_key", "_value_key"],
+        ].itertuples(index=False, name=None)
+    )
+
+    def is_misclassified_current_row(row: pd.Series) -> bool:
+        if row["Source"] != "Current stats":
+            return False
+
+        exact_player_key = (
+            row["_record_type_key"],
+            row["_player_key"],
+            row["_season_key"],
+            row["_value_key"],
+        )
+        exact_category_key = (
+            row["_record_type_key"],
+            row["_category_key"],
+            row["_player_key"],
+            row["_season_key"],
+            row["_value_key"],
+        )
+        if exact_player_key in extracted_exact_player_keys and exact_category_key not in extracted_exact_category_keys:
+            return True
+
+        season_value_key = (row["_record_type_key"], row["_season_key"], row["_value_key"])
+        season_value_category_key = (
+            row["_record_type_key"],
+            row["_category_key"],
+            row["_season_key"],
+            row["_value_key"],
+        )
+        return (
+            season_value_key in extracted_season_value_keys
+            and season_value_category_key not in extracted_season_value_category_keys
+        )
+
+    conflict_mask = deduped.apply(is_misclassified_current_row, axis=1)
+    deduped = deduped[~conflict_mask].copy()
+
+    # For true duplicates in the same category, keep Current stats.
+    deduped["_source_priority"] = deduped["Source"].map({"Current stats": 0, "Extracted record": 1}).fillna(2)
     deduped = deduped.sort_values(
-        ["_record_type_key", "_category_key", "_player_key", "_value_key", "_source_priority", "Season"],
-        ascending=[True, True, True, False, True, False],
+        [
+            "_record_type_key",
+            "_category_key",
+            "_player_key",
+            "_season_key",
+            "_value_key",
+            "_source_priority",
+        ],
+        ascending=[True, True, True, True, False, True],
     )
     deduped = deduped.drop_duplicates(
-        subset=["_record_type_key", "_category_key", "_player_key", "_value_key"],
+        subset=["_record_type_key", "_category_key", "_player_key", "_season_key", "_value_key"],
         keep="first",
     )
     deduped = deduped.drop(
-        columns=["_record_type_key", "_category_key", "_player_key", "_value_key", "_source_priority"]
+        columns=[
+            "_record_type_key",
+            "_category_key",
+            "_player_key",
+            "_season_key",
+            "_value_key",
+            "_source_priority",
+        ]
     )
     return deduped[REQUIRED_COLUMNS].reset_index(drop=True)
 
@@ -291,6 +435,10 @@ def add_current_stat_rows(
     if current_df.empty:
         return
 
+    current_df = remove_aggregate_player_rows(current_df)
+    if current_df.empty:
+        return
+
     inverse_map = {stat_col: category for category, stat_col in category_map.items()}
     valid_cols = [col for col in inverse_map if col in current_df.columns]
     required_id_cols = ["Player", "Season"]
@@ -325,6 +473,7 @@ def add_extracted_record_rows(rows: list[dict[str, Any]], records_df: pd.DataFra
         return
 
     records_df = records_df.rename(columns=lambda c: c.strip())
+    records_df = remove_aggregate_player_rows(records_df)
     required_cols = {"Category", "Player", "Season", "Value"}
     if not required_cols.issubset(records_df.columns):
         missing = ", ".join(sorted(required_cols - set(records_df.columns)))
@@ -367,6 +516,7 @@ def load_career_candidates() -> pd.DataFrame:
 
     if not records_df.empty and not current_df.empty and "Category" in records_df.columns:
         current_df = current_df.rename(columns=lambda c: c.strip())
+        current_df = remove_aggregate_player_rows(current_df)
         if {"Player", "Years"}.issubset(current_df.columns):
             current_df["Player"] = current_df["Player"].astype(str).str.strip()
             current_df["Seasons"] = current_df.get("Seasons", "").astype(str).str.strip()
