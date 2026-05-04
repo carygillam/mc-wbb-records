@@ -32,7 +32,7 @@ DEFAULT_TOP_N = 15
 MIN_TOP_N = 5
 MAX_TOP_N = 50
 
-REQUIRED_COLUMNS = ["RecordType", "Category", "Value", "Player", "Season", "Source"]
+REQUIRED_COLUMNS = ["RecordType", "Category", "Value", "Player", "Season", "Source", "Attempts"]
 DISPLAY_COLUMNS = ["Rank", "Value", "Player", "Season", "Source"]
 CURRENT_HOLDER_COLUMNS = ["Category", "Value", "Player", "Season", "Source"]
 ALL_CANDIDATE_COLUMNS = ["Category", "Value", "Player", "Season", "Source"]
@@ -73,6 +73,32 @@ CATEGORY_GROUPS = (
     ("Rebounding", ("rebounds", "rebound average", "rebounding average")),
     ("Playmaking & Defense", ("assists", "steals", "blocked shots", "blocks", "fouls", "games played")),
 )
+
+# Percentage records should require a minimum number of attempts so a player
+# cannot lead a season/career percentage category by going 1-for-1. These are
+# defaults only; the sidebar lets you turn this rule off or adjust it.
+PERCENTAGE_CATEGORIES = {
+    "Highest Field Goal Percentage",
+    "High 3-Pt FG Percentage",
+    "High Free Throw Percentage",
+}
+PERCENTAGE_ATTEMPT_COLUMNS = {
+    "Highest Field Goal Percentage": "FGA",
+    "High 3-Pt FG Percentage": "3PTA",
+    "High Free Throw Percentage": "FTA",
+}
+DEFAULT_PERCENTAGE_MINIMUMS = {
+    "Season": {
+        "Highest Field Goal Percentage": 100,
+        "High 3-Pt FG Percentage": 50,
+        "High Free Throw Percentage": 50,
+    },
+    "Career": {
+        "Highest Field Goal Percentage": 200,
+        "High 3-Pt FG Percentage": 100,
+        "High Free Throw Percentage": 100,
+    },
+}
 
 
 SINGLE_GAME_CATEGORY_MAP = {
@@ -132,6 +158,19 @@ CAREER_STAT_ALIAS = {
 
 
 @dataclass(frozen=True)
+class PercentageMinimumOptions:
+    """Eligibility settings for percentage records."""
+
+    enabled: bool
+    season_fg_attempts: int
+    season_3pt_attempts: int
+    season_ft_attempts: int
+    career_fg_attempts: int
+    career_3pt_attempts: int
+    career_ft_attempts: int
+
+
+@dataclass(frozen=True)
 class FilterOptions:
     """User-selected filters shared by the summary and category views."""
 
@@ -139,10 +178,52 @@ class FilterOptions:
     seasons: list[str]
     search_term: str
     top_n: int
+    percentage_minimums: PercentageMinimumOptions
+
+
+CATEGORY_ALIASES = {
+    # Scoring average aliases. These are the same basketball stat and should
+    # always appear as one category in the dashboard.
+    "high scoring average": "High Scoring Average",
+    "scoring average": "High Scoring Average",
+    "most points per game": "High Scoring Average",
+    "points per game": "High Scoring Average",
+    "pts/g": "High Scoring Average",
+    "ppg": "High Scoring Average",
+
+    # Rebound average aliases.
+    "high rebound average": "High Rebound Average",
+    "high rebounding average": "High Rebound Average",
+    "rebound average": "High Rebound Average",
+    "rebounding average": "High Rebound Average",
+    "most rebounds per game": "High Rebound Average",
+    "rebounds per game": "High Rebound Average",
+    "reb/g": "High Rebound Average",
+
+    # Percentage label aliases.
+    "high field goal percentage": "Highest Field Goal Percentage",
+    "highest field goal percentage": "Highest Field Goal Percentage",
+    "field goal percentage": "Highest Field Goal Percentage",
+    "fg%": "Highest Field Goal Percentage",
+    "high 3-pt field goal percentage": "High 3-Pt FG Percentage",
+    "high 3-pt fg percentage": "High 3-Pt FG Percentage",
+    "3-pt fg percentage": "High 3-Pt FG Percentage",
+    "3pt%": "High 3-Pt FG Percentage",
+    "high free throw percentage": "High Free Throw Percentage",
+    "free throw percentage": "High Free Throw Percentage",
+    "ft%": "High Free Throw Percentage",
+}
 
 
 def normalize_category(category: str) -> str:
-    return str(category).strip()
+    """Return the canonical display name for a records category.
+
+    This prevents duplicate categories such as "High Scoring Average" and
+    "Most Points Per Game" from being treated as separate records.
+    """
+    cleaned = re.sub(r"\s+", " ", str(category).strip())
+    alias_key = cleaned.lower().replace("–", "-").replace("—", "-").replace("’", "'")
+    return CATEGORY_ALIASES.get(alias_key, cleaned)
 
 
 @st.cache_data
@@ -410,10 +491,15 @@ def append_candidate(
     player: Any,
     season: Any,
     source: str,
+    attempts: Any = pd.NA,
 ) -> None:
     value = pd.to_numeric(value, errors="coerce")
     if pd.isna(value):
         return
+    attempts_value = pd.to_numeric(attempts, errors="coerce")
+    if pd.isna(attempts_value):
+        attempts_value = pd.NA
+
     rows.append(
         {
             "RecordType": record_type,
@@ -422,6 +508,7 @@ def append_candidate(
             "Player": str(player).strip(),
             "Season": str(season).strip(),
             "Source": source,
+            "Attempts": attempts_value,
         }
     )
 
@@ -439,33 +526,35 @@ def add_current_stat_rows(
     if current_df.empty:
         return
 
-    inverse_map = {stat_col: category for category, stat_col in category_map.items()}
-    valid_cols = [col for col in inverse_map if col in current_df.columns]
     required_id_cols = ["Player", "Season"]
-    if not valid_cols or any(col not in current_df.columns for col in required_id_cols):
+    if any(col not in current_df.columns for col in required_id_cols):
         return
 
-    melted = current_df.melt(
-        id_vars=required_id_cols,
-        value_vars=valid_cols,
-        var_name="StatCol",
-        value_name="Value",
-    )
-    melted["Value"] = pd.to_numeric(melted["Value"], errors="coerce")
-    melted = melted.dropna(subset=["Value"])
+    # Iterate row-by-row instead of using melt so percentage records can keep
+    # their attempt denominator (FGA, 3PTA, or FTA) for eligibility checks.
+    for _, source_row in current_df.iterrows():
+        for category, stat_col in category_map.items():
+            if stat_col not in current_df.columns:
+                continue
 
-    for _, row in melted.iterrows():
-        if row["Value"] <= 0:
-            continue
-        append_candidate(
-            rows,
-            record_type=record_type,
-            category=inverse_map[row["StatCol"]],
-            value=row["Value"],
-            player=row["Player"],
-            season=row["Season"],
-            source="Current stats",
-        )
+            value = pd.to_numeric(source_row.get(stat_col), errors="coerce")
+            if pd.isna(value) or value <= 0:
+                continue
+
+            canonical_category = normalize_category(category)
+            attempts_col = PERCENTAGE_ATTEMPT_COLUMNS.get(canonical_category)
+            attempts = source_row.get(attempts_col, pd.NA) if attempts_col else pd.NA
+
+            append_candidate(
+                rows,
+                record_type=record_type,
+                category=canonical_category,
+                value=value,
+                player=source_row["Player"],
+                season=source_row["Season"],
+                source="Current stats",
+                attempts=attempts,
+            )
 
 
 def add_extracted_record_rows(rows: list[dict[str, Any]], records_df: pd.DataFrame, record_type: str) -> None:
@@ -549,6 +638,7 @@ def load_career_candidates() -> pd.DataFrame:
                             player=row["Player"],
                             season=row["Seasons"],
                             source="Current stats",
+                            attempts=row.get(PERCENTAGE_ATTEMPT_COLUMNS.get(normalize_category(category), ""), pd.NA),
                         )
 
     add_extracted_record_rows(rows, records_df, "Career")
@@ -588,6 +678,54 @@ def apply_filters(
         )
         filtered = filtered[mask]
     return filtered
+
+
+def minimum_for_percentage_category(record_type: str, category: str, options: PercentageMinimumOptions) -> int | None:
+    """Return the attempt minimum for a percentage category, if one applies."""
+    category = normalize_category(category)
+    if record_type == "Season":
+        if category == "Highest Field Goal Percentage":
+            return options.season_fg_attempts
+        if category == "High 3-Pt FG Percentage":
+            return options.season_3pt_attempts
+        if category == "High Free Throw Percentage":
+            return options.season_ft_attempts
+    if record_type == "Career":
+        if category == "Highest Field Goal Percentage":
+            return options.career_fg_attempts
+        if category == "High 3-Pt FG Percentage":
+            return options.career_3pt_attempts
+        if category == "High Free Throw Percentage":
+            return options.career_ft_attempts
+    return None
+
+
+def apply_percentage_minimums(df: pd.DataFrame, options: PercentageMinimumOptions) -> pd.DataFrame:
+    """Optionally exclude current-stat percentage rows that do not meet attempts.
+
+    Extracted record rows are kept because those records came from the official
+    historical record list and usually do not include attempt denominators.
+    Current-stat rows include Attempts when the source CSV has FGA/3PTA/FTA.
+    """
+    if df.empty or not options.enabled or "Attempts" not in df.columns:
+        return df
+
+    filtered = df.copy()
+    keep_mask = pd.Series(True, index=filtered.index)
+
+    for idx, row in filtered.iterrows():
+        if row.get("Source") != "Current stats":
+            continue
+
+        minimum = minimum_for_percentage_category(str(row.get("RecordType", "")), str(row.get("Category", "")), options)
+        if minimum is None:
+            continue
+
+        attempts = pd.to_numeric(row.get("Attempts"), errors="coerce")
+        if pd.isna(attempts) or attempts < minimum:
+            keep_mask.loc[idx] = False
+
+    return filtered[keep_mask].copy()
 
 
 def add_rank(df: pd.DataFrame) -> pd.DataFrame:
@@ -716,12 +854,20 @@ def render_sidebar(records_df: pd.DataFrame) -> tuple[str, FilterOptions]:
     )
 
     available_seasons = sorted(records_df["Season"].dropna().unique(), reverse=True)
-    selected_seasons = st.sidebar.multiselect(
-        "Seasons",
-        options=available_seasons,
-        default=available_seasons,
-        help="Choose seasons to narrow the records displayed. All seasons are selected by default.",
+    use_all_seasons = st.sidebar.checkbox(
+        "All seasons",
+        value=True,
+        help="Keep this on to include historical extracted records and current stat rows. Turn it off only when you want to narrow to specific seasons.",
     )
+    if use_all_seasons:
+        selected_seasons = []
+    else:
+        selected_seasons = st.sidebar.multiselect(
+            "Choose seasons",
+            options=available_seasons,
+            default=available_seasons,
+            help="Choose seasons to narrow the records displayed.",
+        )
 
     search_term = st.sidebar.text_input(
         "Search",
@@ -737,11 +883,38 @@ def render_sidebar(records_df: pd.DataFrame) -> tuple[str, FilterOptions]:
         help="Controls how many rows appear after opening a category.",
     )
 
+    st.sidebar.header("Record Standards")
+    percentage_minimums_enabled = st.sidebar.checkbox(
+        "Require minimum attempts for percentage records",
+        value=True,
+        help="Prevents 1-for-1 seasons from leading FG%, 3PT%, or FT% records. Extracted official records are kept because they usually do not include attempts.",
+    )
+
+    with st.sidebar.expander("Percentage minimums", expanded=False):
+        st.caption("Season records")
+        season_fg_attempts = st.number_input("Season FG% minimum FGA", min_value=0, max_value=1000, value=DEFAULT_PERCENTAGE_MINIMUMS["Season"]["Highest Field Goal Percentage"], step=5)
+        season_3pt_attempts = st.number_input("Season 3PT% minimum 3PA", min_value=0, max_value=1000, value=DEFAULT_PERCENTAGE_MINIMUMS["Season"]["High 3-Pt FG Percentage"], step=5)
+        season_ft_attempts = st.number_input("Season FT% minimum FTA", min_value=0, max_value=1000, value=DEFAULT_PERCENTAGE_MINIMUMS["Season"]["High Free Throw Percentage"], step=5)
+
+        st.caption("Career records")
+        career_fg_attempts = st.number_input("Career FG% minimum FGA", min_value=0, max_value=3000, value=DEFAULT_PERCENTAGE_MINIMUMS["Career"]["Highest Field Goal Percentage"], step=10)
+        career_3pt_attempts = st.number_input("Career 3PT% minimum 3PA", min_value=0, max_value=3000, value=DEFAULT_PERCENTAGE_MINIMUMS["Career"]["High 3-Pt FG Percentage"], step=10)
+        career_ft_attempts = st.number_input("Career FT% minimum FTA", min_value=0, max_value=3000, value=DEFAULT_PERCENTAGE_MINIMUMS["Career"]["High Free Throw Percentage"], step=10)
+
     return record_type, FilterOptions(
         sources=selected_sources,
         seasons=selected_seasons,
         search_term=search_term,
         top_n=top_n,
+        percentage_minimums=PercentageMinimumOptions(
+            enabled=percentage_minimums_enabled,
+            season_fg_attempts=int(season_fg_attempts),
+            season_3pt_attempts=int(season_3pt_attempts),
+            season_ft_attempts=int(season_ft_attempts),
+            career_fg_attempts=int(career_fg_attempts),
+            career_3pt_attempts=int(career_3pt_attempts),
+            career_ft_attempts=int(career_ft_attempts),
+        ),
     )
 
 
@@ -1230,6 +1403,7 @@ def main() -> None:
         seasons=filters.seasons,
         search_term=filters.search_term,
     )
+    filtered_df = apply_percentage_minimums(filtered_df, filters.percentage_minimums)
 
     # If the user switches record type or filters out the selected category, return to the current holders view.
     available_categories = set(filtered_df["Category"].dropna().unique())
